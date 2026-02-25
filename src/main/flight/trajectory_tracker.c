@@ -62,7 +62,7 @@ float tt_pos_gain = 2.0; //1.5;
 float tt_vel_gain = 3.0; //2.5;
 // float tt_yaw_gain = 1.0;
 
-// radius of circular trajectory
+// scale parameter for trajectory progress-to-position mapping
 float tt_R = 3.0f;
 
 // recovery algorithm
@@ -153,34 +153,32 @@ bool isActiveTrajectoryTrackerRecovery(void) {
 }
 
 void getRefsTrajectoryTracker(float p) {
-    // hard coded circular trajectory with radius R
-    // x(t)   = R*cos(p(t))
-    // y(t)   = R*sin(p(t))
+    // hard coded straight-line trajectory along +X in NED frame
+    // x(t)   = R*p(t)
+    // y(t)   = 0
     // z(t)   = -1.5
-    // psi(t) = p(t) + pi/2
+    // psi(t) = 0
     // where:
-    // dp/dt  = speed_factor (piecewise constant)
-    while (tt_progress >  M_PIf) tt_progress -= (2.0f * M_PIf);  // always wrap input angle to -PI..PI
-    while (tt_progress < -M_PIf) tt_progress += (2.0f * M_PIf);
+    // dp/dt  = speed_factor (piecewise constant, rad/s-equivalent)
 
     // position refs
-    tt_pos_ref[0] = tt_R*cosf(p);
-    tt_pos_ref[1] = tt_R*sinf(p);
+    tt_pos_ref[0] = tt_R * p;
+    tt_pos_ref[1] = 0.0f;
     tt_pos_ref[2] = -1.5f;
 
     // velocity refs
-    tt_vel_ref[0] = -tt_R*tt_speed_factor*sinf(p);
-    tt_vel_ref[1] = tt_R*tt_speed_factor*cosf(p);
+    tt_vel_ref[0] = tt_R * tt_speed_factor;
+    tt_vel_ref[1] = 0.0f;
     tt_vel_ref[2] = 0.0f;
 
     // acceleration refs
-    tt_acc_ref[0] = -tt_R*tt_speed_factor*tt_speed_factor*cosf(p);
-    tt_acc_ref[1] = -tt_R*tt_speed_factor*tt_speed_factor*sinf(p);
+    tt_acc_ref[0] = 0.0f;
+    tt_acc_ref[1] = 0.0f;
     tt_acc_ref[2] = 0.0f;
 
     // heading
-    tt_yaw_ref = p + M_PIf/2.0f;
-    tt_yaw_rate_ref = tt_speed_factor;
+    tt_yaw_ref = 0.0f;
+    tt_yaw_rate_ref = 0.0f;
     posSpNed.trackPsi = tt_track_heading; // choice: track heading or neglect it?
 }
 
@@ -202,12 +200,12 @@ void initTrajectoryTracker(void) {
 }
 
 void setSpeedTrajectoryTracker(float speed) {
-    tt_speed_factor = speed/tt_R;
+    tt_speed_factor = speed / tt_R;
     tt_active = true;
 }
 
 void incrementSpeedTrajectoryTracker(float inc) {
-    tt_speed_factor += inc/tt_R;
+    tt_speed_factor += inc / tt_R;
     tt_active = true;
 }
 

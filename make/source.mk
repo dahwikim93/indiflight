@@ -538,6 +538,21 @@ OPTIONS += "AS_RECORD_COST"
 OPTIONS += "AS_RECORD_COST_N=5"
 endif
 
+# Do the same for the CVXGENCtlAlloc
+CVXGEN_SRC_DIR = $(ROOT)/lib/main/CVXGENCtlAlloc
+
+ifneq ($(CVXGEN_SRC_DIR),)
+INCLUDE_DIRS += $(CVXGEN_SRC_DIR)
+CVXGEN_SRC = $(CVXGEN_SRC_DIR)/solver.c
+CVXGEN_SRC += $(CVXGEN_SRC_DIR)/matrix_support.c
+CVXGEN_SRC += $(CVXGEN_SRC_DIR)/ldl.c
+CVXGEN_SRC += $(CVXGEN_SRC_DIR)/util.c
+CVXGEN_SRC += $(CVXGEN_SRC_DIR)/globals.c
+CVXGEN_SRC += $(CVXGEN_SRC_DIR)/cvxgen_ca_wrapper.c
+SRC += $(CVXGEN_SRC)
+SPEED_OPTIMISED_SRC += $(CVXGEN_SRC)
+endif
+
 
 # to get this to work do this to the extracted clapack.tgz
 # 1. cd lib/main/clapack/F2CLIBS/libf2c and then

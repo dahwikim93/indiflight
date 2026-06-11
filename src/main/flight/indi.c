@@ -24,6 +24,7 @@
 
 #include <string.h>
 #include <stdbool.h>
+#include <stdio.h>
 
 #include "platform.h"
 
@@ -62,6 +63,10 @@
 
 #include "indi_init.h"
 #include "indi.h"
+
+//CVXGEN solver
+#include "solver.h"
+#include "cvxgen_ca_wrapper.h"
 
 
 #ifndef USE_ACC
@@ -497,6 +502,54 @@ void getMotorCommands(timeUs_t current) {
     if (indiRun.nanCounter > indiRun.wlsNanLimit) {
         disarm(DISARM_REASON_ALLOC_FAILURE);
     }
+
+    float du_cvx[MAXU] = {0.f};
+    int cvx_iters = 0;
+    double cvx_gap = 0.0;
+    double cvx_ineq = 0.0;
+    bool cvx_ok = false;
+
+    if (indiRun.actNum == CVXGEN_CA_ACTS && MAXV == 6) {
+        cvx_ok = cvxgenControlAllocationSolve(
+            A_as,
+            b_as,
+            du_min,
+            du_max,
+            du_cvx,
+            &cvx_iters,
+            &cvx_gap,
+            &cvx_ineq
+        );
+
+        if (cvx_ok) {
+            for (int i = 0; i < indiRun.actNum; i++) {
+                du_as[i] = du_cvx[i];
+            }
+
+            iterations = cvx_iters;
+            as_exit_code = 0;
+        }
+        else {
+            printf(
+            "CVXGEN not converged"
+            );
+        }
+    }
+
+#ifdef MOCKUP
+    static int cvxPrintDecim = 0;
+
+    if ((cvxPrintDecim++ % 2000) == 0) {
+        printf(
+            "CVXGEN actual: ok=%d iters=%d gap=%.9g ineq=%.9g fallback=%d\n",
+            cvx_ok,
+            cvx_iters,
+            cvx_gap,
+            cvx_ineq,
+            !cvx_ok
+        );
+    }
+#endif
 
     // du = Ginv * dv and then constrain between 0 and 1
     for (int i=0; i < indiRun.actNum; i++) {

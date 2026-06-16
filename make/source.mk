@@ -539,7 +539,7 @@ OPTIONS += "AS_RECORD_COST_N=5"
 endif
 
 # Do the same for the CVXGENCtlAlloc
-CVXGEN_SRC_DIR = $(ROOT)/lib/main/CVXGENCtlAlloc
+CVXGEN_SRC_DIR = $(ROOT)/lib/main/CVXGENCtlAllocICBF
 
 ifneq ($(CVXGEN_SRC_DIR),)
 INCLUDE_DIRS += $(CVXGEN_SRC_DIR)
@@ -548,7 +548,7 @@ CVXGEN_SRC += $(CVXGEN_SRC_DIR)/matrix_support.c
 CVXGEN_SRC += $(CVXGEN_SRC_DIR)/ldl.c
 CVXGEN_SRC += $(CVXGEN_SRC_DIR)/util.c
 CVXGEN_SRC += $(CVXGEN_SRC_DIR)/globals.c
-CVXGEN_SRC += $(CVXGEN_SRC_DIR)/cvxgen_ca_wrapper.c
+CVXGEN_SRC += $(CVXGEN_SRC_DIR)/cvxgen_ca_cbf_incremental_wrapper.c
 SRC += $(CVXGEN_SRC)
 SPEED_OPTIMISED_SRC += $(CVXGEN_SRC)
 endif

@@ -64,9 +64,12 @@
 #include "indi_init.h"
 #include "indi.h"
 
-//CVXGEN solver
-#include "solver.h"
-#include "cvxgen_ca_wrapper.h"
+// CVXGEN incremental CBF control-allocation wrapper
+#include "cvxgen_ca_cbf_incremental_wrapper.h"
+
+#ifndef ZERO_LIBRARY_MODE
+#include <signal.h>
+#endif
 
 
 #ifndef USE_ACC
@@ -80,6 +83,9 @@ FAST_DATA_ZERO_INIT indiRuntime_t indiRun;
 
 #define RC_SCALE_THROTTLE 0.001f
 #define RC_OFFSET_THROTTLE 1000.f
+
+#define CBF_GAMMA 1.0f
+#define CBF_RATE_MAG_SQ 50.0f
 
 // refurbish this code somehow
 #if (MAXU > AS_N_U) || (MAXV > AS_N_V)
@@ -418,6 +424,16 @@ void getMotorCommands(timeUs_t current) {
     // use INDI only when in the air, solve linearized global problem otherwise
     bool doIndi = (!isTouchingGround()) && ARMING_FLAG(ARMED);
 
+    /*
+     * Update the filtered actuator operating point before building bounds,
+     * the incremental model and the final actuator command. This guarantees
+     * that the solver and command application use the same uState_fs sample.
+     */
+    for (int i = 0; i < indiRun.actNum; i++) {
+        indiRun.uState_fs[i] = biquadFilterApply(&indiRun.uStateFilter[i], indiRun.uState[i]);
+        indiRun.uState_fs[i] = constrainf(indiRun.uState_fs[i], 0.f, 1.f);
+    }
+
     // compute pseudocontrol
     indiRun.dv[0] = 0.f;
     indiRun.dv[1] = 0.f;
@@ -504,48 +520,183 @@ void getMotorCommands(timeUs_t current) {
     }
 
     float du_cvx[MAXU] = {0.f};
-    int cvx_iters = 0;
-    double cvx_gap = 0.0;
-    double cvx_ineq = 0.0;
     bool cvx_ok = false;
+    cvxgenCaCbfInfo_t cvxInfo = {0};
 
-    if (indiRun.actNum == CVXGEN_CA_ACTS && MAXV == 6) {
-        cvx_ok = cvxgenControlAllocationSolve(
+    if (indiRun.actNum == CVXGEN_CA_CBF_ACTS && MAXV == 6) {
+        float rate_cbf[CVXGEN_CA_CBF_ATT];
+        float rateDot0_cbf[CVXGEN_CA_CBF_ATT];
+        float omegaDot0_cbf[CVXGEN_CA_CBF_ACTS];
+        float G_cbf[CVXGEN_CA_CBF_ATT * CVXGEN_CA_CBF_ACTS];
+        float G2_cbf[CVXGEN_CA_CBF_ATT * CVXGEN_CA_CBF_ACTS];
+
+        for (int axis = 0; axis < CVXGEN_CA_CBF_ATT; axis++) {
+            rate_cbf[axis] = indiRun.rate.A[axis];
+            rateDot0_cbf[axis] = indiRun.rateDot_fs.A[axis];
+        }
+
+        for (int actuator = 0; actuator < CVXGEN_CA_CBF_ACTS; actuator++) {
+            omegaDot0_cbf[actuator] = indiRun.omegaDot_fs[actuator];
+
+            for (int axis = 0; axis < CVXGEN_CA_CBF_ATT; axis++) {
+                const int cvxIndex = axis + CVXGEN_CA_CBF_ATT * actuator;
+
+                /*
+                 * Incremental angular-rate model:
+                 *
+                 * rateDot = rateDot_0 - G2*omegaDot_0 + G*du
+                 *
+                 * G is the same effective angular-control matrix used by the
+                 * INDI allocator: angular rows 3..5 of G1G2.
+                 */
+                G_cbf[cvxIndex] = G1G2[MAXV * actuator + axis + 3];
+                G2_cbf[cvxIndex] = indiRun.actG2[axis][actuator];
+            }
+        }
+
+        const float rateNormSq =
+            rate_cbf[0] * rate_cbf[0]
+            + rate_cbf[1] * rate_cbf[1]
+            + rate_cbf[2] * rate_cbf[2];
+
+        const float h_cbf =
+            CBF_RATE_MAG_SQ - rateNormSq;
+
+        float drift_cbf[CVXGEN_CA_CBF_ATT];
+
+        for (int axis = 0; axis < CVXGEN_CA_CBF_ATT; axis++) {
+            drift_cbf[axis] = rateDot0_cbf[axis];
+
+            for (int actuator = 0; actuator < CVXGEN_CA_CBF_ACTS; actuator++) {
+                const int index =
+                    axis + CVXGEN_CA_CBF_ATT * actuator;
+
+                drift_cbf[axis] -=
+                    G2_cbf[index]
+                    * omegaDot0_cbf[actuator];
+            }
+        }
+
+        const float cbfConstant =
+            -2.0f * (
+                rate_cbf[0] * drift_cbf[0]
+                + rate_cbf[1] * drift_cbf[1]
+                + rate_cbf[2] * drift_cbf[2]
+            )
+            + CBF_GAMMA * h_cbf;
+
+        float cbfCoeff[CVXGEN_CA_CBF_ACTS];
+
+        for (int actuator = 0; actuator < CVXGEN_CA_CBF_ACTS; actuator++) {
+            cbfCoeff[actuator] =
+                -2.0f * (
+                    rate_cbf[0]
+                        * G_cbf[0 + CVXGEN_CA_CBF_ATT * actuator]
+                    + rate_cbf[1]
+                        * G_cbf[1 + CVXGEN_CA_CBF_ATT * actuator]
+                    + rate_cbf[2]
+                        * G_cbf[2 + CVXGEN_CA_CBF_ATT * actuator]
+                );
+        }
+
+        float cbfMinimum = cbfConstant;
+        float cbfMaximum = cbfConstant;
+
+        for (int i = 0; i < CVXGEN_CA_CBF_ACTS; i++) {
+            if (cbfCoeff[i] >= 0.0f) {
+                cbfMinimum += cbfCoeff[i] * du_min[i];
+                cbfMaximum += cbfCoeff[i] * du_max[i];
+            } else {
+                cbfMinimum += cbfCoeff[i] * du_max[i];
+                cbfMaximum += cbfCoeff[i] * du_min[i];
+            }
+        }
+
+        printf(
+            "\nCBF DEBUG\n"
+            "rate          = [% .6e, % .6e, % .6e]\n"
+            "rateNormSq    = % .6e\n"
+            "h             = % .6e\n"
+            "drift         = [% .6e, % .6e, % .6e]\n"
+            "constant      = % .6e\n"
+            "coeff         = [% .6e, % .6e, % .6e, % .6e]\n"
+            "minimum       = % .6e\n"
+            "maximum       = % .6e\n",
+            rate_cbf[0],
+            rate_cbf[1],
+            rate_cbf[2],
+            rateNormSq,
+            h_cbf,
+            drift_cbf[0],
+            drift_cbf[1],
+            drift_cbf[2],
+            cbfConstant,
+            cbfCoeff[0],
+            cbfCoeff[1],
+            cbfCoeff[2],
+            cbfCoeff[3],
+            cbfMinimum,
+            cbfMaximum
+        );
+
+
+
+        cvx_ok = cvxgenCaCbfSolve(
             A_as,
             b_as,
             du_min,
             du_max,
+            rate_cbf,
+            rateDot0_cbf,
+            G2_cbf,
+            omegaDot0_cbf,
+            G_cbf,
+            CBF_GAMMA,
+            CBF_RATE_MAG_SQ,
             du_cvx,
-            &cvx_iters,
-            &cvx_gap,
-            &cvx_ineq
+            &cvxInfo
         );
+
+
+        if (!cvx_ok) {
+            printf(
+                "CVXGEN failed: iter=%d gap=% .6e ineq=% .6e h=% .6e cbfMax=% .6e\n",
+                cvxInfo.iterations,
+                cvxInfo.gap,
+                cvxInfo.inequality_residual_squared,
+                h_cbf,
+                cbfMaximum
+            );
+
+        #ifndef ZERO_LIBRARY_MODE
+            raise(SIGTRAP);
+        #endif
+        }
 
         if (cvx_ok) {
             for (int i = 0; i < indiRun.actNum; i++) {
                 du_as[i] = du_cvx[i];
             }
 
-            iterations = cvx_iters;
-            as_exit_code = 0;
-        }
-        else {
-            printf(
-            "CVXGEN not converged"
-            );
+            iterations = cvxInfo.iterations;
+            as_exit_code = AS_SUCCESS;
+        } else {
+            printf("CVXGEN incremental CBF solver did not converge\n");
         }
     }
+
 
 #ifdef MOCKUP
     static int cvxPrintDecim = 0;
 
     if ((cvxPrintDecim++ % 2000) == 0) {
         printf(
-            "CVXGEN actual: ok=%d iters=%d gap=%.9g ineq=%.9g fallback=%d\n",
+            "CVXGEN incremental CBF: ok=%d iters=%d gap=%.9g ineq=%.9g cbf=%.9g fallback=%d\n",
             cvx_ok,
-            cvx_iters,
-            cvx_gap,
-            cvx_ineq,
+            cvxInfo.iterations,
+            cvxInfo.gap,
+            cvxInfo.inequality_residual_squared,
+            cvxInfo.cbf_value,
             !cvx_ok
         );
     }
@@ -553,13 +704,9 @@ void getMotorCommands(timeUs_t current) {
 
     // du = Ginv * dv and then constrain between 0 and 1
     for (int i=0; i < indiRun.actNum; i++) {
-        // apply dgyro filters to sync with input
-        // also apply gyro filters here?
-        indiRun.uState_fs[i] = biquadFilterApply(&indiRun.uStateFilter[i], indiRun.uState[i]);
-        indiRun.uState_fs[i] = constrainf(indiRun.uState_fs[i], 0.f, 1.f);
-
-        if (as_exit_code < AS_NAN_FOUND_Q)
-            indiRun.u[i] = constrainf(doIndi*indiRun.uState_fs[i] + du_as[i], 0.f, indiRun.actLimit[i]);// currentPidProfile->motor_output_limit * 0.01f);
+        if (as_exit_code < AS_NAN_FOUND_Q) {
+            indiRun.u[i] = constrainf(doIndi * indiRun.uState_fs[i] + du_as[i], 0.f, indiRun.actLimit[i]);
+        }
 
         // apply lag filter to simulate spinup dynamics
         du[i] = indiRun.u[i] - indiRun.uState[i]; // actual du. SHOULD be identical to du_as, when doIndi

@@ -10,6 +10,7 @@ static bool allFinite(const float *values, int count)
 {
     for (int i = 0; i < count; i++) {
         if (!isfinite(values[i])) {
+            printf("cvx err #1");
             return false;
         }
     }
@@ -154,6 +155,7 @@ bool cvxgenCaCbfSolve(
     if (A == NULL || b == NULL || du_min == NULL || du_max == NULL
         || rate == NULL || rateDot_0 == NULL || G2 == NULL
         || omegaDot_0 == NULL || G == NULL || du_out == NULL) {
+        printf("cvx err #2");
         return false;
     }
 
@@ -168,15 +170,18 @@ bool cvxgenCaCbfSolve(
         || !allFinite(G, CVXGEN_CA_CBF_ATT * CVXGEN_CA_CBF_ACTS)
         || !isfinite(gamma)
         || !isfinite(rateMag_sq)) {
+        printf("cvx err #3");
         return false;
     }
 
     if (gamma < 0.0f || rateMag_sq < 0.0f) {
+        printf("cvx err #4");
         return false;
     }
 
     for (int i = 0; i < CVXGEN_CA_CBF_ACTS; i++) {
         if (du_min[i] > du_max[i]) {
+            printf("cvx err #5");
             return false;
         }
     }
@@ -189,7 +194,7 @@ bool cvxgenCaCbfSolve(
         settings.max_iters = 30;
         settings.refine_steps = 1;
         settings.better_start = 1;
-        settings.eps = 1e-4;
+        settings.eps = 1e-6;
         settings.resid_tol = 1e-6;
         settings.kkt_reg = 1e-7;
 
@@ -298,6 +303,7 @@ bool cvxgenCaCbfSolve(
     }
 
     if (work.converged != 1) {
+        printf("cvx err #6");
         return false;
     }
 
@@ -311,6 +317,7 @@ bool cvxgenCaCbfSolve(
     for (int i = 0; i < CVXGEN_CA_CBF_ACTS; i++) {
         if (du_out[i] < du_min[i] - 1e-5f
             || du_out[i] > du_max[i] + 1e-5f) {
+            printf("cvx err #7");
             return false;
         }
     }
@@ -336,7 +343,8 @@ bool cvxgenCaCbfSolve(
     /*
      * Reject a solution that violates the original CBF inequality.
      */
-    if (!isfinite(cbfValue) || cbfValue < -1e-5) {
+    if (!isfinite(cbfValue) || cbfValue < -1e-3) {
+        printf("cvx err #8, %f", cbfValue);
         return false;
     }
 

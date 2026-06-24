@@ -66,7 +66,6 @@
 
 // CVXGEN incremental CBF control-allocation wrapper
 #include "cvxgen_ca_cbf_incremental_wrapper.h"
-
 #ifndef ZERO_LIBRARY_MODE
 #include <signal.h>
 #endif
@@ -84,7 +83,8 @@ FAST_DATA_ZERO_INIT indiRuntime_t indiRun;
 #define RC_SCALE_THROTTLE 0.001f
 #define RC_OFFSET_THROTTLE 1000.f
 
-#define CBF_GAMMA 1.0f
+// CVXGEN incremental CBF control-allocation wrapper
+#define CBF_GAMMA 100.0f
 #define CBF_RATE_MAG_SQ 50.0f
 
 // refurbish this code somehow
@@ -382,6 +382,9 @@ void getMotorCommands(timeUs_t current) {
         indiRun.rate.A[axis] = DEGREES_TO_RADIANS(gyro.gyroADCafterRpm[axis]);
         indiRun.spf.A[axis] = acc.accADCafterRpm[axis] * acc.dev.acc_1G_rec * GRAVITYf;
 
+        //// filter gyro
+        //indiRun.rate_fs.A[axis] = biquadFilterApply(&indiRun.rateFilter[axis], indiRun.rate.A[axis]);
+
         // get gyro derivative
         indiRun.rateDot.A[axis] = indiRun.indiFrequency * (indiRun.rate.A[axis] - rate_prev[axis]);
         rate_prev[axis] = indiRun.rate.A[axis];
@@ -519,6 +522,7 @@ void getMotorCommands(timeUs_t current) {
         disarm(DISARM_REASON_ALLOC_FAILURE);
     }
 
+    // CVXGEN incremental CBF control-allocation wrapper
     float du_cvx[MAXU] = {0.f};
     bool cvx_ok = false;
     cvxgenCaCbfInfo_t cvxInfo = {0};
@@ -639,8 +643,6 @@ void getMotorCommands(timeUs_t current) {
             cbfMaximum
         );
 
-
-
         cvx_ok = cvxgenCaCbfSolve(
             A_as,
             b_as,
@@ -657,7 +659,6 @@ void getMotorCommands(timeUs_t current) {
             &cvxInfo
         );
 
-
         if (!cvx_ok) {
             printf(
                 "CVXGEN failed: iter=%d gap=% .6e ineq=% .6e h=% .6e cbfMax=% .6e\n",
@@ -673,6 +674,7 @@ void getMotorCommands(timeUs_t current) {
         #endif
         }
 
+        //cvx_ok = false ;
         if (cvx_ok) {
             for (int i = 0; i < indiRun.actNum; i++) {
                 du_as[i] = du_cvx[i];

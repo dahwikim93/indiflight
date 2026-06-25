@@ -85,7 +85,7 @@ FAST_DATA_ZERO_INIT indiRuntime_t indiRun;
 
 // CVXGEN incremental CBF control-allocation wrapper
 #define CBF_GAMMA 100.0f
-#define CBF_RATE_MAG_SQ 50.0f
+#define CBF_RATE_MAG_SQ 20.0f
 
 // refurbish this code somehow
 #if (MAXU > AS_N_U) || (MAXV > AS_N_V)

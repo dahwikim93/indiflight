@@ -194,7 +194,7 @@ bool cvxgenCaCbfSolve(
         settings.max_iters = 30;
         settings.refine_steps = 1;
         settings.better_start = 1;
-        settings.eps = 1e-6;
+        settings.eps = 1e-4;
         settings.resid_tol = 1e-6;
         settings.kkt_reg = 1e-7;
 

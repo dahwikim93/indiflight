@@ -84,8 +84,8 @@ FAST_DATA_ZERO_INIT indiRuntime_t indiRun;
 #define RC_OFFSET_THROTTLE 1000.f
 
 // CVXGEN incremental CBF control-allocation wrapper
-#define CBF_GAMMA 100.0f
-#define CBF_RATE_MAG_SQ 20.0f
+#define CBF_GAMMA_TILT 50.0f
+#define CBF_GAMMA_YAW 100.0f
 
 // refurbish this code somehow
 #if (MAXU > AS_N_U) || (MAXV > AS_N_V)
@@ -338,8 +338,8 @@ void getAlphaSpBody(timeUs_t current) {
         // else: just keep rateSpBody.V.Z that has been set
 
         // constrain to be safe
-        VEC3_CONSTRAIN_XY_LENGTH(indiRun.rateSpBody, indiRun.attMaxTiltRate);
-        indiRun.rateSpBody.V.Z = constrainf(indiRun.rateSpBody.V.Z, -indiRun.attMaxYawRate, indiRun.attMaxYawRate);
+        //VEC3_CONSTRAIN_XY_LENGTH(indiRun.rateSpBody, indiRun.attMaxTiltRate);
+        //indiRun.rateSpBody.V.Z = constrainf(indiRun.rateSpBody.V.Z, -indiRun.attMaxYawRate, indiRun.attMaxYawRate);
     }
 
     // limit to absolute max values
@@ -528,14 +528,30 @@ void getMotorCommands(timeUs_t current) {
     cvxgenCaCbfInfo_t cvxInfo = {0};
 
     if (indiRun.actNum == CVXGEN_CA_CBF_ACTS && MAXV == 6) {
-        float rate_cbf[CVXGEN_CA_CBF_ATT];
+        float rate_tilt_cbf[CVXGEN_CA_CBF_ATT];
+        float rate_yaw_cbf[CVXGEN_CA_CBF_ATT];
         float rateDot0_cbf[CVXGEN_CA_CBF_ATT];
         float omegaDot0_cbf[CVXGEN_CA_CBF_ACTS];
         float G_cbf[CVXGEN_CA_CBF_ATT * CVXGEN_CA_CBF_ACTS];
         float G2_cbf[CVXGEN_CA_CBF_ATT * CVXGEN_CA_CBF_ACTS];
 
+        /*
+         * Split body-rate CBF:
+         *   h_tilt = attMaxTiltRate^2 - (p^2 + q^2)
+         *   h_yaw  = attMaxYawRate^2  - r^2
+         *
+         * This matches the existing INDI setpoint limits:
+         *   indi_attitude_max_tilt_rate and indi_attitude_max_yaw_rate.
+         */
+        rate_tilt_cbf[0] = indiRun.rate.A[FD_ROLL];
+        rate_tilt_cbf[1] = indiRun.rate.A[FD_PITCH];
+        rate_tilt_cbf[2] = 0.0f;
+
+        rate_yaw_cbf[0] = 0.0f;
+        rate_yaw_cbf[1] = 0.0f;
+        rate_yaw_cbf[2] = indiRun.rate.A[FD_YAW];
+
         for (int axis = 0; axis < CVXGEN_CA_CBF_ATT; axis++) {
-            rate_cbf[axis] = indiRun.rate.A[axis];
             rateDot0_cbf[axis] = indiRun.rateDot_fs.A[axis];
         }
 
@@ -548,7 +564,7 @@ void getMotorCommands(timeUs_t current) {
                 /*
                  * Incremental angular-rate model:
                  *
-                 * rateDot = rateDot_0 - G2*omegaDot_0 + G*du
+                 *   rateDot = rateDot_0 - G2*omegaDot_0 + G*du
                  *
                  * G is the same effective angular-control matrix used by the
                  * INDI allocator: angular rows 3..5 of G1G2.
@@ -558,13 +574,20 @@ void getMotorCommands(timeUs_t current) {
             }
         }
 
-        const float rateNormSq =
-            rate_cbf[0] * rate_cbf[0]
-            + rate_cbf[1] * rate_cbf[1]
-            + rate_cbf[2] * rate_cbf[2];
+        const float tiltRateMagSq =
+            indiRun.attMaxTiltRate * indiRun.attMaxTiltRate;
+        const float yawRateMagSq =
+            indiRun.attMaxYawRate * indiRun.attMaxYawRate;
 
-        const float h_cbf =
-            CBF_RATE_MAG_SQ - rateNormSq;
+        const float tiltNormSq =
+            rate_tilt_cbf[0] * rate_tilt_cbf[0]
+            + rate_tilt_cbf[1] * rate_tilt_cbf[1];
+
+        const float yawNormSq =
+            rate_yaw_cbf[2] * rate_yaw_cbf[2];
+
+        const float h_tilt = tiltRateMagSq - tiltNormSq;
+        const float h_yaw = yawRateMagSq - yawNormSq;
 
         float drift_cbf[CVXGEN_CA_CBF_ATT];
 
@@ -581,66 +604,95 @@ void getMotorCommands(timeUs_t current) {
             }
         }
 
-        const float cbfConstant =
+        const float tiltConstant =
             -2.0f * (
-                rate_cbf[0] * drift_cbf[0]
-                + rate_cbf[1] * drift_cbf[1]
-                + rate_cbf[2] * drift_cbf[2]
+                rate_tilt_cbf[0] * drift_cbf[0]
+                + rate_tilt_cbf[1] * drift_cbf[1]
             )
-            + CBF_GAMMA * h_cbf;
+            + CBF_GAMMA_TILT * h_tilt;
 
-        float cbfCoeff[CVXGEN_CA_CBF_ACTS];
+        const float yawConstant =
+            -2.0f * rate_yaw_cbf[2] * drift_cbf[2]
+            + CBF_GAMMA_YAW * h_yaw;
+
+        float tiltCoeff[CVXGEN_CA_CBF_ACTS];
+        float yawCoeff[CVXGEN_CA_CBF_ACTS];
 
         for (int actuator = 0; actuator < CVXGEN_CA_CBF_ACTS; actuator++) {
-            cbfCoeff[actuator] =
+            tiltCoeff[actuator] =
                 -2.0f * (
-                    rate_cbf[0]
+                    rate_tilt_cbf[0]
                         * G_cbf[0 + CVXGEN_CA_CBF_ATT * actuator]
-                    + rate_cbf[1]
+                    + rate_tilt_cbf[1]
                         * G_cbf[1 + CVXGEN_CA_CBF_ATT * actuator]
-                    + rate_cbf[2]
-                        * G_cbf[2 + CVXGEN_CA_CBF_ATT * actuator]
                 );
+
+            yawCoeff[actuator] =
+                -2.0f * rate_yaw_cbf[2]
+                    * G_cbf[2 + CVXGEN_CA_CBF_ATT * actuator];
         }
 
-        float cbfMinimum = cbfConstant;
-        float cbfMaximum = cbfConstant;
+        float tiltMinimum = tiltConstant;
+        float tiltMaximum = tiltConstant;
+        float yawMinimum = yawConstant;
+        float yawMaximum = yawConstant;
 
         for (int i = 0; i < CVXGEN_CA_CBF_ACTS; i++) {
-            if (cbfCoeff[i] >= 0.0f) {
-                cbfMinimum += cbfCoeff[i] * du_min[i];
-                cbfMaximum += cbfCoeff[i] * du_max[i];
+            if (tiltCoeff[i] >= 0.0f) {
+                tiltMinimum += tiltCoeff[i] * du_min[i];
+                tiltMaximum += tiltCoeff[i] * du_max[i];
             } else {
-                cbfMinimum += cbfCoeff[i] * du_max[i];
-                cbfMaximum += cbfCoeff[i] * du_min[i];
+                tiltMinimum += tiltCoeff[i] * du_max[i];
+                tiltMaximum += tiltCoeff[i] * du_min[i];
+            }
+
+            if (yawCoeff[i] >= 0.0f) {
+                yawMinimum += yawCoeff[i] * du_min[i];
+                yawMaximum += yawCoeff[i] * du_max[i];
+            } else {
+                yawMinimum += yawCoeff[i] * du_max[i];
+                yawMaximum += yawCoeff[i] * du_min[i];
             }
         }
 
         printf(
             "\nCBF DEBUG\n"
             "rate          = [% .6e, % .6e, % .6e]\n"
-            "rateNormSq    = % .6e\n"
-            "h             = % .6e\n"
+            "tiltNormSq    = % .6e limitSq=% .6e h=% .6e\n"
+            "yawNormSq     = % .6e limitSq=% .6e h=% .6e\n"
             "drift         = [% .6e, % .6e, % .6e]\n"
-            "constant      = % .6e\n"
-            "coeff         = [% .6e, % .6e, % .6e, % .6e]\n"
-            "minimum       = % .6e\n"
-            "maximum       = % .6e\n",
-            rate_cbf[0],
-            rate_cbf[1],
-            rate_cbf[2],
-            rateNormSq,
-            h_cbf,
+            "tilt constant = % .6e\n"
+            "tilt coeff    = [% .6e, % .6e, % .6e, % .6e]\n"
+            "tilt min/max  = [% .6e, % .6e]\n"
+            "yaw constant  = % .6e\n"
+            "yaw coeff     = [% .6e, % .6e, % .6e, % .6e]\n"
+            "yaw min/max   = [% .6e, % .6e]\n",
+            rate_tilt_cbf[0],
+            rate_tilt_cbf[1],
+            rate_yaw_cbf[2],
+            tiltNormSq,
+            tiltRateMagSq,
+            h_tilt,
+            yawNormSq,
+            yawRateMagSq,
+            h_yaw,
             drift_cbf[0],
             drift_cbf[1],
             drift_cbf[2],
-            cbfConstant,
-            cbfCoeff[0],
-            cbfCoeff[1],
-            cbfCoeff[2],
-            cbfCoeff[3],
-            cbfMinimum,
-            cbfMaximum
+            tiltConstant,
+            tiltCoeff[0],
+            tiltCoeff[1],
+            tiltCoeff[2],
+            tiltCoeff[3],
+            tiltMinimum,
+            tiltMaximum,
+            yawConstant,
+            yawCoeff[0],
+            yawCoeff[1],
+            yawCoeff[2],
+            yawCoeff[3],
+            yawMinimum,
+            yawMaximum
         );
 
         cvx_ok = cvxgenCaCbfSolve(
@@ -648,25 +700,32 @@ void getMotorCommands(timeUs_t current) {
             b_as,
             du_min,
             du_max,
-            rate_cbf,
+            rate_tilt_cbf,
+            rate_yaw_cbf,
             rateDot0_cbf,
             G2_cbf,
             omegaDot0_cbf,
             G_cbf,
-            CBF_GAMMA,
-            CBF_RATE_MAG_SQ,
+            CBF_GAMMA_TILT,
+            CBF_GAMMA_YAW,
+            tiltRateMagSq,
+            yawRateMagSq,
             du_cvx,
             &cvxInfo
         );
 
         if (!cvx_ok) {
             printf(
-                "CVXGEN failed: iter=%d gap=% .6e ineq=% .6e h=% .6e cbfMax=% .6e\n",
+                "CVXGEN failed: iter=%d gap=% .6e ineq=% .6e "
+                "h_tilt=% .6e h_yaw=% .6e "
+                "tiltMax=% .6e yawMax=% .6e\n",
                 cvxInfo.iterations,
                 cvxInfo.gap,
                 cvxInfo.inequality_residual_squared,
-                h_cbf,
-                cbfMaximum
+                h_tilt,
+                h_yaw,
+                tiltMaximum,
+                yawMaximum
             );
 
         #ifndef ZERO_LIBRARY_MODE
@@ -683,7 +742,7 @@ void getMotorCommands(timeUs_t current) {
             iterations = cvxInfo.iterations;
             as_exit_code = AS_SUCCESS;
         } else {
-            printf("CVXGEN incremental CBF solver did not converge\n");
+            printf("CVXGEN split-rate CBF solver did not converge\n");
         }
     }
 
@@ -693,12 +752,14 @@ void getMotorCommands(timeUs_t current) {
 
     if ((cvxPrintDecim++ % 2000) == 0) {
         printf(
-            "CVXGEN incremental CBF: ok=%d iters=%d gap=%.9g ineq=%.9g cbf=%.9g fallback=%d\n",
+            "CVXGEN split-rate CBF: ok=%d iters=%d gap=%.9g ineq=%.9g cbfTilt=%.9g cbfYaw=%.9g cbfMin=%.9g fallback=%d\n",
             cvx_ok,
             cvxInfo.iterations,
             cvxInfo.gap,
             cvxInfo.inequality_residual_squared,
-            cvxInfo.cbf_value,
+            cvxInfo.cbf_tilt_value,
+            cvxInfo.cbf_yaw_value,
+            cvxInfo.cbf_min_value,
             !cvx_ok
         );
     }

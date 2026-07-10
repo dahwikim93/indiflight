@@ -539,7 +539,7 @@ OPTIONS += "AS_RECORD_COST_N=5"
 endif
 
 # Do the same for the CVXGENCtlAlloc
-CVXGEN_SRC_DIR = $(ROOT)/lib/main/CVXGENCtlAllocICBF
+CVXGEN_SRC_DIR = $(ROOT)/lib/main/CVXGENCtlAllocICBF2
 
 ifneq ($(CVXGEN_SRC_DIR),)
 INCLUDE_DIRS += $(CVXGEN_SRC_DIR)

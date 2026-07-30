@@ -241,12 +241,12 @@ bool cvxgenCaCbfSolve(
         set_defaults();
         setup_indexing();
 
-        settings.verbose = 1;
+        settings.verbose = 0;
         settings.max_iters = 30;
         settings.refine_steps = 1;
         settings.better_start = 1;
         settings.eps = 1e-4;
-        settings.resid_tol = 1e-6;
+        settings.resid_tol = 1e-5;
         settings.kkt_reg = 1e-7;
 
         initialized = true;

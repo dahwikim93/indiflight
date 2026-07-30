@@ -64,6 +64,8 @@
 #include "indi_init.h"
 #include "indi.h"
 
+#include "build/debug.h"
+
 // CVXGEN incremental CBF control-allocation wrapper
 #include "cvxgen_ca_cbf_incremental_wrapper.h"
 #ifndef ZERO_LIBRARY_MODE
@@ -84,8 +86,10 @@ FAST_DATA_ZERO_INIT indiRuntime_t indiRun;
 #define RC_OFFSET_THROTTLE 1000.f
 
 // CVXGEN incremental CBF control-allocation wrapper
-#define CBF_GAMMA_TILT 50.0f
-#define CBF_GAMMA_YAW 100.0f
+#define CBF_GAMMA_TILT 15.0f
+#define CBF_GAMMA_YAW 30.0f
+
+volatile uint32_t cvxFailureCount = 0;
 
 // refurbish this code somehow
 #if (MAXU > AS_N_U) || (MAXV > AS_N_V)
@@ -543,13 +547,13 @@ void getMotorCommands(timeUs_t current) {
          * This matches the existing INDI setpoint limits:
          *   indi_attitude_max_tilt_rate and indi_attitude_max_yaw_rate.
          */
-        rate_tilt_cbf[0] = indiRun.rate.A[FD_ROLL];
-        rate_tilt_cbf[1] = indiRun.rate.A[FD_PITCH];
+        rate_tilt_cbf[0] = DEGREES_TO_RADIANS(gyro.gyroADCf[FD_ROLL]);
+        rate_tilt_cbf[1] = DEGREES_TO_RADIANS(gyro.gyroADCf[FD_PITCH]);
         rate_tilt_cbf[2] = 0.0f;
 
         rate_yaw_cbf[0] = 0.0f;
         rate_yaw_cbf[1] = 0.0f;
-        rate_yaw_cbf[2] = indiRun.rate.A[FD_YAW];
+        rate_yaw_cbf[2] = DEGREES_TO_RADIANS(gyro.gyroADCf[FD_YAW]);
 
         for (int axis = 0; axis < CVXGEN_CA_CBF_ATT; axis++) {
             rateDot0_cbf[axis] = indiRun.rateDot_fs.A[axis];
@@ -589,6 +593,7 @@ void getMotorCommands(timeUs_t current) {
         const float h_tilt = tiltRateMagSq - tiltNormSq;
         const float h_yaw = yawRateMagSq - yawNormSq;
 
+#ifdef MOCKUP
         float drift_cbf[CVXGEN_CA_CBF_ATT];
 
         for (int axis = 0; axis < CVXGEN_CA_CBF_ATT; axis++) {
@@ -660,12 +665,7 @@ void getMotorCommands(timeUs_t current) {
             "rate          = [% .6e, % .6e, % .6e]\n"
             "tiltNormSq    = % .6e limitSq=% .6e h=% .6e\n"
             "yawNormSq     = % .6e limitSq=% .6e h=% .6e\n"
-            "drift         = [% .6e, % .6e, % .6e]\n"
-            "tilt constant = % .6e\n"
-            "tilt coeff    = [% .6e, % .6e, % .6e, % .6e]\n"
             "tilt min/max  = [% .6e, % .6e]\n"
-            "yaw constant  = % .6e\n"
-            "yaw coeff     = [% .6e, % .6e, % .6e, % .6e]\n"
             "yaw min/max   = [% .6e, % .6e]\n",
             rate_tilt_cbf[0],
             rate_tilt_cbf[1],
@@ -676,24 +676,12 @@ void getMotorCommands(timeUs_t current) {
             yawNormSq,
             yawRateMagSq,
             h_yaw,
-            drift_cbf[0],
-            drift_cbf[1],
-            drift_cbf[2],
-            tiltConstant,
-            tiltCoeff[0],
-            tiltCoeff[1],
-            tiltCoeff[2],
-            tiltCoeff[3],
             tiltMinimum,
             tiltMaximum,
-            yawConstant,
-            yawCoeff[0],
-            yawCoeff[1],
-            yawCoeff[2],
-            yawCoeff[3],
             yawMinimum,
             yawMaximum
         );
+#endif
 
         cvx_ok = cvxgenCaCbfSolve(
             A_as,
@@ -714,26 +702,6 @@ void getMotorCommands(timeUs_t current) {
             &cvxInfo
         );
 
-        if (!cvx_ok) {
-            printf(
-                "CVXGEN failed: iter=%d gap=% .6e ineq=% .6e "
-                "h_tilt=% .6e h_yaw=% .6e "
-                "tiltMax=% .6e yawMax=% .6e\n",
-                cvxInfo.iterations,
-                cvxInfo.gap,
-                cvxInfo.inequality_residual_squared,
-                h_tilt,
-                h_yaw,
-                tiltMaximum,
-                yawMaximum
-            );
-
-        #ifndef ZERO_LIBRARY_MODE
-            raise(SIGTRAP);
-        #endif
-        }
-
-        //cvx_ok = false ;
         if (cvx_ok) {
             for (int i = 0; i < indiRun.actNum; i++) {
                 du_as[i] = du_cvx[i];
@@ -741,29 +709,21 @@ void getMotorCommands(timeUs_t current) {
 
             iterations = cvxInfo.iterations;
             as_exit_code = AS_SUCCESS;
-        } else {
-            printf("CVXGEN split-rate CBF solver did not converge\n");
-        }
-    }
-
-
+        } else
 #ifdef MOCKUP
-    static int cvxPrintDecim = 0;
-
-    if ((cvxPrintDecim++ % 2000) == 0) {
-        printf(
-            "CVXGEN split-rate CBF: ok=%d iters=%d gap=%.9g ineq=%.9g cbfTilt=%.9g cbfYaw=%.9g cbfMin=%.9g fallback=%d\n",
-            cvx_ok,
-            cvxInfo.iterations,
-            cvxInfo.gap,
-            cvxInfo.inequality_residual_squared,
-            cvxInfo.cbf_tilt_value,
-            cvxInfo.cbf_yaw_value,
-            cvxInfo.cbf_min_value,
-            !cvx_ok
-        );
-    }
+        {
+            printf("CVXGEN split-rate CBF solver did not converge\n");
+            raise(SIGTRAP);
+        }
 #endif
+
+        if (!cvx_ok) cvxFailureCount++;
+
+        DEBUG_SET(DEBUG_CBF, 0, h_tilt);
+        DEBUG_SET(DEBUG_CBF, 1, cvxInfo.cbf_tilt_value);
+        DEBUG_SET(DEBUG_CBF, 2, cvxFailureCount);
+        DEBUG_SET(DEBUG_CBF, 3, h_yaw);
+    }
 
     // du = Ginv * dv and then constrain between 0 and 1
     for (int i=0; i < indiRun.actNum; i++) {

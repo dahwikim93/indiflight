@@ -7,6 +7,7 @@
 /* Filename: solver.c. */
 /* Description: Main solver file. */
 #include "solver.h"
+#include <float.h>
 double eval_gap(void) {
   int i;
   double gap;
@@ -235,7 +236,7 @@ void better_start(void) {
     work.y[i] = y[i];
   /* Now complete the initialization. Start with s. */
   /* Must have alpha > max(z). */
-  alpha = -1e99;
+  alpha = -DBL_MAX;
   for (i = 0; i < 10; i++)
     if (alpha < z[i])
       alpha = z[i];
@@ -249,7 +250,7 @@ void better_start(void) {
   }
   /* Now initialize z. */
   /* Now must have alpha > max(-z). */
-  alpha = -1e99;
+  alpha = -DBL_MAX;
   for (i = 0; i < 10; i++)
     if (alpha < -z[i])
       alpha = -z[i];
